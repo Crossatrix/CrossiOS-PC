@@ -89,6 +89,35 @@ button.primary{background:var(--accent);color:#06222f;border-color:var(--accent)
     </div>
 
     <div class="box">
+      <h2>Data drive</h2>
+      <label for="hdmode">Virtual hard disk</label>
+      <select id="hdmode">
+        <option value="none">None</option>
+        <option value="new">New blank drive</option>
+        <option value="file">Load a disk image (.img)</option>
+      </select>
+      <div id="hdnew" hidden>
+        <label for="hdsize">Size</label>
+        <select id="hdsize">
+          <option value="64">64 MB</option>
+          <option value="256">256 MB</option>
+          <option value="512" selected>512 MB</option>
+          <option value="1024">1 GB</option>
+          <option value="2048">2 GB</option>
+        </select>
+      </div>
+      <div id="hdfile" hidden>
+        <label for="hdpick">Image file</label>
+        <input id="hdpick" type="file" accept=".img,.raw,.bin,.hdd" style="width:100%;font-size:.82rem;color:var(--dim)">
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="hddl" disabled>Download image</button>
+        <button id="hdwipe" disabled>Discard</button>
+      </div>
+      <p id="hdinfo" class="hint">Attached as the first hard disk. Format it from inside the guest (for example fdisk and mkfs, or Disk Management). Changes live in memory, so download the image to keep them.</p>
+    </div>
+
+    <div class="box">
       <h2>Controls</h2>
       <div class="row">
         <button id="start" class="primary" disabled>Boot</button>
@@ -169,6 +198,7 @@ function setRunning(on){
   $("idle").style.display = on ? "none" : "flex";
   $("s-run").textContent = on ? "yes" : "no";
   $("kb").classList.toggle("off", !on);
+  updateHdUI();
 }
 
 async function boot(){
@@ -181,7 +211,9 @@ async function boot(){
       ? { buffer: source.file, async: true } // read lazily in chunks; huge ISOs can't fit in one ArrayBuffer
       : { url: source.url, async: true };
     const V = window.V86 || window.V86Starter;
+    const hd = prepareDrive();
     emu = new V({
+      ...(hd ? { hda: { buffer: hd } } : {}),
       wasm_path: CONFIG.wasm,
       memory_size: +$("mem").value * 1024 * 1024,
       vga_memory_size: +$("vmem").value * 1024 * 1024,
@@ -219,6 +251,61 @@ async function shutdown(){
   $("s-ips").textContent = "-";
   status("Powered off.");
 }
+
+// ---- Virtual data drive ----
+// v86 reads and writes this ArrayBuffer directly, so it holds the live disk contents.
+let hdBuffer = null, hdTag = "";
+
+function updateHdUI(){
+  const mode = $("hdmode").value, running = !!emu;
+  $("hdnew").hidden = mode !== "new";
+  $("hdfile").hidden = mode !== "file";
+  ["hdmode","hdsize","hdpick"].forEach(id => $(id).disabled = running);
+  $("hddl").disabled = !hdBuffer;
+  $("hdwipe").disabled = !hdBuffer || running;
+  $("hdinfo").textContent = hdBuffer
+    ? "Drive ready: " + fmt(hdBuffer.byteLength) + (running ? ". Attached to the running machine." : ". It will be attached on the next boot.")
+    : "Attached as the first hard disk. Format it from inside the guest (for example fdisk and mkfs, or Disk Management). Changes live in memory, so download the image to keep them.";
+}
+
+function prepareDrive(){
+  const mode = $("hdmode").value;
+  if (mode === "none") return null;
+  if (mode === "new") {
+    const bytes = +$("hdsize").value * 1024 * 1024, tag = "new:" + bytes;
+    if (!hdBuffer || hdTag !== tag) {
+      try { hdBuffer = new ArrayBuffer(bytes); }
+      catch (e) { throw new Error("Not enough memory for a " + fmt(bytes) + " drive. Try a smaller size."); }
+      hdTag = tag;
+    }
+  } else if (!hdBuffer || !hdTag.startsWith("file:")) {
+    throw new Error("Choose a disk image file first.");
+  }
+  updateHdUI();
+  return hdBuffer;
+}
+
+$("hdmode").onchange = updateHdUI;
+$("hdpick").onchange = async () => {
+  const f = $("hdpick").files[0];
+  if (!f) return;
+  try { hdBuffer = await f.arrayBuffer(); hdTag = "file:" + f.name; status("Loaded disk image " + f.name + "."); }
+  catch (e) { status("Could not read that disk image: " + e.message, "err"); }
+  updateHdUI();
+};
+$("hddl").onclick = () => {
+  if (!hdBuffer) return;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([hdBuffer], { type: "application/octet-stream" }));
+  a.download = hdTag.startsWith("file:") ? hdTag.slice(5) : "data-drive.img";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+};
+$("hdwipe").onclick = () => {
+  if (!hdBuffer || emu) return;
+  if (confirm("Discard the virtual drive and everything on it?")) { hdBuffer = null; hdTag = ""; updateHdUI(); status("Drive discarded."); }
+};
+updateHdUI();
 
 // ---- On-screen keyboard (PC scancode set 1) ----
 // key: [label, shiftedLabel, scancode, extra class]; scancode > 0xFF means extended (E0 prefix)
