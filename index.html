@@ -130,6 +130,17 @@ button.primary{background:var(--accent);color:#06222f;border-color:var(--accent)
         <button id="full" disabled>Fullscreen</button>
         <button id="shot" disabled>Screenshot</button>
       </div>
+      <div class="row" style="margin-top:8px">
+        <button id="savest" disabled>Save state</button>
+        <button id="loadst" disabled>Load state</button>
+        <input id="statefile" type="file" hidden>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="qsave" disabled>Quick save</button>
+        <button id="qload" disabled>Quick load</button>
+      </div>
+      <p id="qinfo" class="hint" style="margin-top:8px">Quick slot: empty. It lives in memory only and is cleared on power off or page reload.</p>
+      <p class="hint" style="margin-top:8px">A state file is a snapshot of the whole machine. Load it into a machine booted with the same ISO, memory size and data drive settings.</p>
       <p id="status" style="margin:12px 0 0">Waiting for an image.</p>
     </div>
 
@@ -193,12 +204,13 @@ $("url").oninput = () => {
 };
 
 function setRunning(on){
-  ["pause","reset","stop","cad","full","shot"].forEach(id => $(id).disabled = !on);
+  ["pause","reset","stop","cad","full","shot","savest","loadst"].forEach(id => $(id).disabled = !on);
   $("start").disabled = on || !source;
   $("idle").style.display = on ? "none" : "flex";
   $("s-run").textContent = on ? "yes" : "no";
   $("kb").classList.toggle("off", !on);
   updateHdUI();
+  updateQuickUI();
 }
 
 async function boot(){
@@ -244,6 +256,7 @@ async function boot(){
 async function shutdown(){
   clearInterval(statTimer);
   clearLatched();
+  quickState = null;
   if (emu) { try { await emu.destroy(); } catch(e){} emu = null; }
   const scr = $("screen");
   scr.innerHTML = "<div></div><canvas></canvas>";
@@ -251,6 +264,86 @@ async function shutdown(){
   $("s-ips").textContent = "-";
   status("Powered off.");
 }
+
+// ---- Save / load machine state ----
+// Handles both v86 API styles: a returned Promise (newer) or a callback (older).
+function saveStateBuffer(){
+  return new Promise((resolve, reject) => {
+    const r = emu.save_state((err, s) => err ? reject(err) : resolve(s));
+    if (r && typeof r.then === "function") r.then(resolve, reject);
+  });
+}
+
+$("savest").onclick = async () => {
+  if (!emu) return;
+  status("Saving state...");
+  try {
+    const state = await saveStateBuffer();
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([state], { type: "application/octet-stream" }));
+    a.download = "vm-state-" + stamp + ".v86state";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    status("State saved (" + fmt(state.byteLength) + ").", "ok");
+  } catch (e) {
+    console.error(e);
+    status("Could not save state: " + (e && e.message || e), "err");
+  }
+};
+
+// Quick slot: one snapshot kept in memory for instant save/load.
+let quickState = null;
+function updateQuickUI(){
+  $("qsave").disabled = !emu;
+  $("qload").disabled = !emu || !quickState;
+  $("qinfo").textContent = quickState
+    ? "Quick slot: " + fmt(quickState.byteLength) + " saved at " + quickState.time + ". It lives in memory only and is cleared on power off or page reload."
+    : "Quick slot: empty. It lives in memory only and is cleared on power off or page reload.";
+}
+$("qsave").onclick = async () => {
+  if (!emu) return;
+  status("Saving to quick slot...");
+  try {
+    const s = await saveStateBuffer();
+    quickState = s; quickState.time = new Date().toLocaleTimeString();
+    status("Quick saved (" + fmt(s.byteLength) + ").", "ok");
+  } catch (e) {
+    console.error(e);
+    status("Could not quick save: " + (e && e.message || e), "err");
+  }
+  updateQuickUI();
+};
+$("qload").onclick = async () => {
+  if (!emu || !quickState) return;
+  status("Restoring quick slot...");
+  try {
+    await emu.restore_state(quickState);
+    if (paused) { paused = false; $("pause").textContent = "Pause"; }
+    emu.run();
+    status("Quick slot restored.", "ok");
+  } catch (e) {
+    console.error(e);
+    status("Could not restore the quick slot.", "err");
+  }
+};
+
+$("loadst").onclick = () => $("statefile").click();
+$("statefile").onchange = async () => {
+  const f = $("statefile").files[0];
+  $("statefile").value = "";
+  if (!f || !emu) return;
+  status("Loading state...");
+  try {
+    await emu.restore_state(await f.arrayBuffer());
+    if (paused) { paused = false; $("pause").textContent = "Pause"; }
+    emu.run();
+    status("State restored from " + f.name + ".", "ok");
+  } catch (e) {
+    console.error(e);
+    status("Could not load state. It must match this machine's ISO, memory and drive settings.", "err");
+  }
+};
 
 // ---- Virtual data drive ----
 // v86 reads and writes this ArrayBuffer directly, so it holds the live disk contents.
