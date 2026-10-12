@@ -178,7 +178,7 @@ async function boot(){
   status("Loading image...");
   try {
     const cdrom = source.file
-      ? { buffer: await source.file.arrayBuffer() }
+      ? { buffer: source.file, async: true } // read lazily in chunks; huge ISOs can't fit in one ArrayBuffer
       : { url: source.url, async: true };
     const V = window.V86 || window.V86Starter;
     emu = new V({
